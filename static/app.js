@@ -146,6 +146,22 @@ const EXAMPLES = {
     removable: ["M01", "M02", "M03"],
     query: null,
     autoMinRemoval: true
+  },
+  "12": {
+    name: "测量复核排程",
+    points: ["A", "B", "C"],
+    constraints: [
+      { id: "M01", from: "A", to: "B", low: 10, high: 20 },
+      { id: "M02", from: "B", to: "C", low: 10, high: 20 },
+      { id: "M03", from: "A", to: "C", low: 20, high: 40 }
+    ],
+    query: null,
+    inspection: {
+      M01: { selected: true, duration: "10", failPerMille: "20", prerequisites: [] },
+      M02: { selected: true, duration: "60", failPerMille: "500", prerequisites: [] },
+      M03: { selected: true, duration: "5", failPerMille: "500", prerequisites: ["M02"] }
+    },
+    autoInspection: true
   }
 };
 
@@ -172,6 +188,8 @@ let state = {
   impact: null,            // 最近一次改动影响报告（基线或编辑稿变化后置空失效）
   removable: {},           // 测量编号 -> true（标记为可撤回；缺省锁定，至多 16 条）
   minRemoval: null,        // 最近一次最小撤回预览（点、测量或标记变化后置空失效）
+  inspection: {},          // 测量编号 -> {selected, duration, failPerMille, prerequisites:[]}
+  inspectionPlan: null,    // 最近一次复核排程结果（测量或排程参数变化后置空失效）
   query: { from: "", to: "", targetLow: "", targetHigh: "" },
   readingWindow: { from: "", to: "", targetFrom: "", targetTo: "", targetLow: "", targetHigh: "" },
   shimPlan: { targetFrom: "", targetTo: "", targetLow: "", targetHigh: "" }
@@ -205,7 +223,8 @@ function persist() {
       shimPlan: state.shimPlan,
       positions: state.positions,
       baseline: state.baseline,
-      removable: state.removable
+      removable: state.removable,
+      inspection: state.inspection
     }));
   } catch (e) { /* 忽略存储异常 */ }
 }
@@ -218,12 +237,24 @@ function markDirty() {
   state.shim = null;       // 点/测量变化后旧垫片方案失效
   state.impact = null;     // 编辑稿变化后旧改动影响报告失效
   state.minRemoval = null; // 点/测量变化后旧最小撤回预览失效
+  state.inspectionPlan = null; // 测量变化后旧复核排程结果失效
   const ids = new Set(state.constraints.map((c) => c.id));
   for (const id of Object.keys(state.steps)) {
     if (!ids.has(id)) delete state.steps[id];   // 清理已删除约束的步长
   }
   for (const id of Object.keys(state.removable)) {
     if (!ids.has(id)) delete state.removable[id];   // 清理已删除约束的可撤回标记
+  }
+  for (const id of Object.keys(state.inspection)) {
+    if (!ids.has(id)) {
+      delete state.inspection[id];  // 清理已删除约束的排程条目
+    } else {
+      // 依赖中可能引用了被删除的测量：一并清理（旧结果已在上方置空失效）
+      const entry = state.inspection[id];
+      if (entry && Array.isArray(entry.prerequisites)) {
+        entry.prerequisites = entry.prerequisites.filter((p) => ids.has(p));
+      }
+    }
   }
   const pset = new Set(state.points);
   for (const p of Object.keys(state.nominals)) {
@@ -249,6 +280,7 @@ function markDirty() {
   renderShimResult();
   renderImpact();
   renderMinRemoval();
+  renderInspection();
 }
 async function postJSON(url, body) {
   const resp = await fetch(url, {
@@ -341,6 +373,15 @@ function showMinRemovalError(msg) {
     : esc(msg);
 }
 function clearMinRemovalMessage() { $("minRemovalMessage").hidden = true; }
+function showInspectionError(msg) {
+  const box = $("inspectionMessage");
+  box.hidden = false;
+  box.className = "message error";
+  box.innerHTML = Array.isArray(msg)
+    ? "<ul>" + msg.map((m) => `<li>${esc(m)}</li>`).join("") + "</ul>"
+    : esc(msg);
+}
+function clearInspectionMessage() { $("inspectionMessage").hidden = true; }
 
 /* ---------------- 渲染：基准点 ---------------- */
 function renderPoints() {
@@ -418,6 +459,7 @@ function renderAll() {
   renderShimResult();
   renderImpact();
   renderMinRemoval();
+  renderInspection();
 }
 
 /* ---------------- 结果区 ---------------- */
@@ -1614,6 +1656,167 @@ function applyMinRemoval() {
   runAnalyze();
 }
 
+/* ---------------- 测量复核排程 ---------------- */
+const INSPECTION_DEFAULTS = { duration: "10", failPerMille: "10" };
+
+function inspectionEntry(id) {
+  if (!state.inspection[id]) {
+    state.inspection[id] = {
+      selected: false,
+      duration: INSPECTION_DEFAULTS.duration,
+      failPerMille: INSPECTION_DEFAULTS.failPerMille,
+      prerequisites: []
+    };
+  }
+  const e = state.inspection[id];
+  if (!Array.isArray(e.prerequisites)) e.prerequisites = [];
+  return e;
+}
+
+function selectedInspectionConstraints() {
+  return state.constraints.filter((c) => {
+    const e = state.inspection[c.id];
+    return e && e.selected;
+  });
+}
+
+function invalidateInspection() {
+  state.inspectionPlan = null;
+  clearInspectionMessage();
+  renderInspectionResult();
+  persist();
+}
+
+function renderInspectionTable() {
+  const tbody = $("inspectionTbody");
+  const has = state.constraints.length > 0;
+  $("inspectionEmpty").style.display = has ? "none" : "block";
+  $("inspectionTable").style.display = has ? "" : "none";
+  const chosen = selectedInspectionConstraints();
+  $("inspectionCounter").textContent = `${chosen.length} / 16 已选`;
+  if (!has) { tbody.innerHTML = ""; return; }
+  tbody.innerHTML = state.constraints.map((c) => {
+    const e = inspectionEntry(c.id);
+    const d = parseIntStrict(e.duration);
+    const f = parseIntStrict(e.failPerMille);
+    const dBad = e.duration !== "" && (d === null || d < 1 || d > 1000);
+    const fBad = e.failPerMille !== "" && (f === null || f < 0 || f > 999);
+    const preOptions = chosen
+      .filter((x) => x.id !== c.id)
+      .map((x) => `<option value="${esc(x.id)}"${e.prerequisites.includes(x.id) ? " selected" : ""}>${esc(x.id)}</option>`)
+      .join("");
+    return `<tr class="${e.selected ? "insp-selected" : ""}">
+      <td><input type="checkbox" data-insp-select="${esc(c.id)}"${e.selected ? " checked" : ""}></td>
+      <td>${esc(c.id)}</td>
+      <td>${esc(c.from)} → ${esc(c.to)}</td>
+      <td><input type="number" class="input insp-input${dBad ? " bad" : ""}"
+           data-insp-field="duration" data-insp-for="${esc(c.id)}"
+           min="1" max="1000" step="1" value="${esc(e.duration)}"
+           ${e.selected ? "" : "disabled"}></td>
+      <td><input type="number" class="input insp-input${fBad ? " bad" : ""}"
+           data-insp-field="failPerMille" data-insp-for="${esc(c.id)}"
+           min="0" max="999" step="1" value="${esc(e.failPerMille)}"
+           ${e.selected ? "" : "disabled"}></td>
+      <td><select multiple size="${Math.min(Math.max(2, chosen.length - 1), 5)}"
+           class="input insp-pre${chosen.length <= 1 ? " disabled" : ""}"
+           data-insp-pre="${esc(c.id)}" ${e.selected && chosen.length > 1 ? "" : "disabled"}
+           title="按住 Ctrl / ⌘ 点选多个；只能选择已勾选的其他测量">${preOptions}</select></td>
+    </tr>`;
+  }).join("");
+}
+
+function renderInspectionResult() {
+  const box = $("inspectionResult");
+  const r = state.inspectionPlan;
+  if (!r) { box.innerHTML = ""; return; }
+  const byId = {};
+  for (const it of r.items) byId[it.id] = it;
+  const chips = r.order.ids.map((id, k) =>
+    `<li class="insp-chip"><span class="insp-step-no">${k + 1}</span><span class="insp-chip-id">${esc(id)}</span>
+       <small>原位置 ${r.order.positions[k]}・耗时 ${byId[id].duration}・不合格 ${byId[id].failPerMille}‰</small></li>`).join("");
+  const rows = r.steps.map((s) => {
+    const pre = s.prerequisiteIds.length ? s.prerequisiteIds.map(esc).join("、") : "—";
+    return `<tr>
+      <td class="num"><b>${s.step}</b></td>
+      <td>${esc(s.id)}<small class="insp-pos">（原位置 ${s.position}）</small></td>
+      <td class="num">${s.duration}</td>
+      <td class="num">${s.failPerMille}‰</td>
+      <td>${pre}</td>
+      <td class="num">${s.runProbability.decimal} <small class="exact">= ${s.runProbability.numerator}/${s.runProbability.denominator}</small></td>
+      <td class="num">${s.expectedContribution.decimal} <small class="exact">= ${s.expectedContribution.numerator}/${s.expectedContribution.denominator}</small></td>
+    </tr>`;
+  }).join("");
+  box.innerHTML = `
+    <div class="verdict-banner pass"><span class="icon">✓</span>
+      <div>最优复核顺序已排定：预期总耗时 ${r.expectedTotal.decimal} 分钟
+      <span class="sub">精确分数 ${r.expectedTotal.numerator}/${r.expectedTotal.denominator}；满足全部“必须先复核”依赖，且为所有可行完整顺序中预期总耗时最小者，并列时按原录入位置序号向量取字典序最小。复核遇首条不合格即停止，故越靠后的步骤实际执行概率越低。</span></div>
+    </div>
+    <ol class="insp-order">${chips}</ol>
+    <div class="table-wrap insp-result-table">
+      <table class="data-table">
+        <thead><tr><th>步序</th><th>测量</th><th>耗时</th><th>不合格概率</th><th>前置依赖</th><th>执行概率（此前各项均合格）</th><th>对预期总耗时的贡献</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <p class="simp-note">执行概率与贡献均为精确分数；“贡献 = 耗时 × 执行概率”，各步贡献之和即预期总耗时 ${r.expectedTotal.decimal}。</p>`;
+}
+
+function renderInspection() {
+  renderInspectionTable();
+  renderInspectionResult();
+}
+
+async function runInspection() {
+  clearInspectionMessage();
+  if (state.points.length < 2) return showInspectionError("请先录入至少 2 个基准点。");
+  if (state.constraints.length < 1) return showInspectionError("请至少录入 1 条测量约束。");
+  const chosen = selectedInspectionConstraints();
+  if (chosen.length < 1 || chosen.length > 16) {
+    return showInspectionError(`参加复核的测量须为 1～16 条（当前 ${chosen.length} 条）。`);
+  }
+  const errs = [];
+  const items = [];
+  for (const c of chosen) {
+    const e = state.inspection[c.id];
+    const d = parseIntStrict(e.duration);
+    const f = parseIntStrict(e.failPerMille);
+    if (d === null) errs.push(`测量 ${c.id}：复核耗时必须为整数。`);
+    else if (d < 1 || d > 1000) errs.push(`测量 ${c.id}：复核耗时须为 1～1000（当前 ${d}）。`);
+    if (f === null) errs.push(`测量 ${c.id}：不合格概率必须为整数。`);
+    else if (f < 0 || f > 999) errs.push(`测量 ${c.id}：不合格概率须为 0～999‰（当前 ${f}）。`);
+    const badPre = e.prerequisites.find((p) => {
+      const pe = state.inspection[p];
+      return !pe || !pe.selected;
+    });
+    if (badPre !== undefined) {
+      errs.push(`测量 ${c.id}：前置依赖 ${badPre} 未选取，依赖只能引用所选测量。`);
+    }
+    if (e.prerequisites.includes(c.id)) errs.push(`测量 ${c.id}：不能依赖自身。`);
+    if (d !== null && f !== null) {
+      items.push({ id: c.id, duration: d, failPerMille: f, prerequisites: e.prerequisites.slice() });
+    }
+  }
+  if (errs.length) { state.inspectionPlan = null; renderInspectionResult(); return showInspectionError(errs); }
+
+  const btn = $("inspectionBtn");
+  btn.disabled = true;
+  btn.textContent = "排程计算中…";
+  const { ok, data } = await postJSON("/api/inspection-order", {
+    points: state.points,
+    constraints: state.constraints,
+    items
+  });
+  btn.disabled = false;
+  btn.textContent = "计算复核排程";
+  if (!ok) {
+    state.inspectionPlan = null;
+    renderInspectionResult();
+    return showInspectionError(data && data.detail ? data.detail : "复核排程请求失败。");
+  }
+  state.inspectionPlan = data;
+  renderInspectionResult();
+}
+
 /* ---------------- 示例 ---------------- */
 async function loadExample(key) {
   const ex = EXAMPLES[key];
@@ -1640,6 +1843,8 @@ async function loadExample(key) {
   state.minRemoval = null;
   state.removable = {};
   if (ex.removable) for (const id of ex.removable) state.removable[id] = true;
+  state.inspection = ex.inspection ? JSON.parse(JSON.stringify(ex.inspection)) : {};
+  state.inspectionPlan = null;
   if (ex.impactBaseline) {
     state.baseline = {
       points: ex.impactBaseline.points.slice(),
@@ -1653,11 +1858,13 @@ async function loadExample(key) {
   renderPositions();
   renderShimResult();
   renderMinRemoval();
+  renderInspection();
   clearSimplifyMessage();
   clearToleranceMessage();
   clearFitMessage();
   clearImpactMessage();
   clearMinRemovalMessage();
+  clearInspectionMessage();
   resetConstraintForm();
   if (ex.query) {
     state.query = { ...ex.query };
@@ -1709,6 +1916,9 @@ async function loadExample(key) {
   if (ex.autoMinRemoval) {
     await runMinRemoval();
   }
+  if (ex.autoInspection) {
+    await runInspection();
+  }
 }
 
 /* ---------------- 初始化 ---------------- */
@@ -1729,6 +1939,9 @@ function init() {
     }
     if (saved.removable && typeof saved.removable === "object") {
       state.removable = saved.removable;
+    }
+    if (saved.inspection && typeof saved.inspection === "object") {
+      state.inspection = saved.inspection;
     }
     if (Array.isArray(saved.positions)) {
       state.positions = saved.positions
@@ -1785,6 +1998,7 @@ function init() {
   $("clearBaselineBtn").addEventListener("click", clearBaseline);
   $("impactBtn").addEventListener("click", runImpact);
   $("minRemovalBtn").addEventListener("click", runMinRemoval);
+  $("inspectionBtn").addEventListener("click", runInspection);
   $("removalTbody").addEventListener("click", (e) => {
     const btn = e.target.closest("button[data-rem-toggle]");
     if (!btn) return;
@@ -1803,6 +2017,54 @@ function init() {
     clearMinRemovalMessage();
     persist();
     renderMinRemoval();
+  });
+  // 测量复核排程：勾选 / 耗时 / 概率 / 前置依赖变化均清除旧排程结果
+  $("inspectionTbody").addEventListener("change", (e) => {
+    const chk = e.target.closest("input[data-insp-select]");
+    if (chk) {
+      const id = chk.dataset.inspSelect;
+      const entry = inspectionEntry(id);
+      // selectedInspectionConstraints() 基于状态，此刻尚未置位，故勾选时 +1
+      const count = selectedInspectionConstraints().length + (chk.checked ? 1 : 0);
+      if (chk.checked && count > 16) {
+        chk.checked = false;
+        return showInspectionError("参加复核的测量至多 16 条；请先取消其他测量的勾选。");
+      }
+      entry.selected = chk.checked;
+      if (!chk.checked) {
+        // 取消勾选：其他测量对它的前置引用一并清除
+        for (const c of state.constraints) {
+          const other = state.inspection[c.id];
+          if (other && Array.isArray(other.prerequisites) && other.prerequisites.includes(id)) {
+            other.prerequisites = other.prerequisites.filter((p) => p !== id);
+          }
+        }
+      }
+      invalidateInspection();
+      renderInspectionTable();
+      return;
+    }
+    const preSel = e.target.closest("select[data-insp-pre]");
+    if (preSel) {
+      const id = preSel.dataset.inspPre;
+      inspectionEntry(id).prerequisites = Array.from(preSel.selectedOptions).map((o) => o.value);
+      invalidateInspection();
+    }
+  });
+  $("inspectionTbody").addEventListener("input", (e) => {
+    const inp = e.target.closest("input[data-insp-field]");
+    if (!inp) return;
+    const id = inp.dataset.inspFor;
+    const field = inp.dataset.inspField;   // duration | failPerMille
+    const raw = inp.value.trim();
+    const entry = inspectionEntry(id);
+    entry[field] = raw;
+    const v = parseIntStrict(raw);
+    const bad = field === "duration"
+      ? (raw !== "" && (v === null || v < 1 || v > 1000))
+      : (raw !== "" && (v === null || v < 0 || v > 999));
+    inp.classList.toggle("bad", bad);
+    invalidateInspection();
   });
   $("addPositionBtn").addEventListener("click", () => {
     if (state.positions.length >= 10) return;

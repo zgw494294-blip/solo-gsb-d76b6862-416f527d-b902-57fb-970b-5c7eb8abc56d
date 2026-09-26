@@ -22,6 +22,12 @@
                           空撤回集；矛盾时只允许删除可撤回测量，求使剩余清单一致
                           的最少删除条数，并列时按原录入顺序取删除序号列表字典序
                           最小者；锁定测量自身矛盾时返回不可修复及锁定部分负环）
+  POST /api/inspection-order 测量复核排程（从当前清单选取 1～16 条测量，每条带
+                          复核耗时 1～1000、独立不合格概率 0～999‰ 与“必须先
+                          复核”的前置编号；依赖只能引用所选测量、成环报错；
+                          遇首条不合格即停止，子集 DP 求满足依赖且预期总耗时
+                          最小的完整顺序，并列按原录入位置序号向量取字典序最小；
+                          概率与期望以精确分数返回，不枚举全部排列）
 静态：GET /         前端页面（static/index.html）
 """
 
@@ -106,6 +112,19 @@ class ShimPlanIn(BaseModel):
     model_config = {"extra": "ignore"}
 
 
+class InspectionItemIn(BaseModel):
+    id: str | None = None
+    duration: StrictInt | None = None
+    fail_per_mille: StrictInt | None = None
+    prerequisites: list[str] | None = None
+
+    model_config = {"extra": "ignore"}
+
+
+class InspectionOrderIn(AnalyzeIn):
+    items: list[InspectionItemIn]
+
+
 def _payload(raw: dict) -> dict:
     """Pydantic 字段 from/to 转 from_point/to_point（from 是 Python 关键字）。"""
     constraints = []
@@ -142,6 +161,10 @@ def _field_label(loc: tuple) -> str:
         "options": "选项",
         "thickness": "厚度",
         "cost": "成本",
+        "items": "复核条目",
+        "duration": "复核耗时",
+        "fail_per_mille": "不合格概率",
+        "prerequisites": "前置依赖",
     }
     raw = list(loc)
     labels: list[str] = []
@@ -149,18 +172,27 @@ def _field_label(loc: tuple) -> str:
         if p == "body":
             continue
         if isinstance(p, int):
-            # 下标本身已渲染为“第 N 个安装位/选项”，跳过紧随的容器名单词
+            # 下标本身已渲染为“第 N 个安装位/选项/复核条目/前置依赖”，跳过紧随的容器名单词
             if k >= 1 and raw[k - 1] == "positions":
                 labels.append(f"第 {p + 1} 个安装位")
             elif k >= 1 and raw[k - 1] == "options":
                 labels.append(f"第 {p + 1} 个选项")
+            elif k >= 1 and raw[k - 1] == "items":
+                labels.append(f"第 {p + 1} 个复核条目")
+            elif k >= 1 and raw[k - 1] == "prerequisites":
+                # 形如 items・第 t 个复核条目・prerequisites・第 j 个前置依赖
+                labels.append(f"第 {p + 1} 个前置依赖")
             else:
                 labels.append(f"第 {p + 1} 项")
         else:
             name = mapping.get(str(p), str(p))
-            # “positions / options”由其后的下标短语表达，不再单独拼一次
-            if (p in ("positions", "options") and k + 1 < len(raw)
-                    and isinstance(raw[k + 1], int)):
+            # “positions / options / items / prerequisites”由其后的下标短语表达，不再单独拼一次；
+            # 但 prerequisites 作为 items 内字段名、其后是字段（非下标）时仍保留
+            if (p in ("positions", "options", "items")
+                    and k + 1 < len(raw) and isinstance(raw[k + 1], int)):
+                continue
+            if (p == "prerequisites" and k >= 1 and raw[k - 1] == "items"
+                    and k + 1 < len(raw) and isinstance(raw[k + 1], int)):
                 continue
             labels.append(name)
     if labels and labels[0] == "测量约束" and len(labels) >= 2:
@@ -559,6 +591,51 @@ async def min_removal(request: Request):
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"detail": list(exc.args[0])})
     return solver.min_removal(points, constraints, removable)
+
+
+@app.post("/api/inspection-order")
+async def inspection_order(request: Request):
+    try:
+        raw = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"detail": ["请求体不是合法的 JSON"]})
+    if not isinstance(raw, dict):
+        return JSONResponse(status_code=400, content={"detail": ["请求体必须是 JSON 对象"]})
+    try:
+        items_raw = []
+        for it in raw.get("items", []) if isinstance(raw.get("items"), list) else []:
+            if not isinstance(it, dict):
+                items_raw.append({})
+                continue
+            items_raw.append({
+                "id": it.get("id"),
+                "duration": it.get("duration"),
+                "fail_per_mille": it.get("failPerMille"),
+                "prerequisites": it.get("prerequisites"),
+            })
+        model = InspectionOrderIn(**{**_payload(raw), "items": items_raw})
+    except ValidationError as exc:
+        return JSONResponse(status_code=400,
+                            content={"detail": _validation_messages(exc)})
+
+    payload = {
+        "points": model.points,
+        "constraints": [
+            {"id": c.id, "from": c.from_point, "to": c.to_point,
+             "low": c.low, "high": c.high}
+            for c in model.constraints
+        ],
+    }
+    try:
+        points, constraints = solver.validate(payload)
+        items = solver.validate_inspection_items(constraints, [
+            {"id": it.id, "duration": it.duration,
+             "failPerMille": it.fail_per_mille, "prerequisites": it.prerequisites}
+            for it in model.items
+        ])
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"detail": list(exc.args[0])})
+    return solver.inspection_order(items)
 
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
