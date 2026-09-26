@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>装配尺寸链校验台</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">⌖</span>
+    <div>
+      <h1>装配尺寸链校验台</h1>
+      <p class="subtitle">差分约束系统 · 负权闭环矛盾定位 · 最紧间隙界判定 · 容差预算 · 名义坐标拟合 · 补测读数窗口 · 垫片组合选配 · 尺寸链改动影响 · 矛盾测量最小撤回（单位：μm）</p>
+    </div>
+  </div>
+  <div class="examples">
+    <label for="exampleSelect" class="examples-label">载入示例：</label>
+    <select id="exampleSelect">
+      <option value="">— 选择示例 —</option>
+      <option value="1">示例 1：线性尺寸链（合格）</option>
+      <option value="2">示例 2：负权闭环（尺寸矛盾）</option>
+      <option value="3">示例 3：未连通与待复核</option>
+      <option value="4">示例 4：测量清单精简（含冗余测量）</option>
+      <option value="5">示例 5：容差预算（矛盾可修复）</option>
+      <option value="6">示例 6：锁定测量矛盾（不可修复）</option>
+      <option value="7">示例 7：名义坐标拟合（最小最大偏差）</option>
+      <option value="8">示例 8：补测读数窗口（精确补测）</option>
+      <option value="9">示例 9：垫片组合选配（最低成本 + 字典序）</option>
+      <option value="10">示例 10：尺寸链改动影响（基线对比）</option>
+      <option value="11">示例 11：矛盾测量最小撤回（最少删除）</option>
+    </select>
+  </div>
+</header>
+
+<main class="layout">
+  <!-- ============ 左栏：数据录入 ============ -->
+  <section class="col">
+    <div class="card">
+      <div class="card-head">
+        <h2>① 基准点</h2>
+        <span class="counter" id="pointCounter">0 / 30</span>
+      </div>
+      <div class="row">
+        <input type="text" id="pointName" class="input" placeholder="基准点名称，如 A、P1、支架左端面" maxlength="32">
+        <button class="btn primary" id="addPointBtn">添加基准点</button>
+      </div>
+      <ul class="chips" id="pointList"></ul>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>② 测量约束</h2>
+        <span class="counter" id="constraintCounter">0 / 80</span>
+      </div>
+      <p class="hint">每条约束含义：<b>终点坐标 − 起点坐标 ∈ [下限, 上限]</b>（闭区间，整数 μm）</p>
+      <div class="grid-form">
+        <label>编号
+          <input type="text" id="cId" class="input" placeholder="自动" maxlength="24">
+        </label>
+        <label>起点
+          <select id="cFrom" class="input"></select>
+        </label>
+        <label>终点
+          <select id="cTo" class="input"></select>
+        </label>
+        <label>下限 μm
+          <input type="number" id="cLow" class="input" step="1" placeholder="如 -5">
+        </label>
+        <label>上限 μm
+          <input type="number" id="cHigh" class="input" step="1" placeholder="如 5">
+        </label>
+      </div>
+      <div class="row">
+        <button class="btn primary" id="saveConstraintBtn">添加约束</button>
+        <button class="btn ghost hidden" id="cancelEditBtn">取消编辑</button>
+      </div>
+
+      <div class="table-wrap">
+        <table class="data-table" id="constraintTable">
+          <thead>
+            <tr><th>编号</th><th>起点</th><th>终点</th><th>下限</th><th>上限</th><th>操作</th></tr>
+          </thead>
+          <tbody id="constraintTbody"></tbody>
+        </table>
+        <p class="empty-hint" id="constraintEmpty">尚未录入约束</p>
+      </div>
+    </div>
+
+    <div class="message" id="formMessage" hidden></div>
+
+    <div class="card run-card">
+      <button class="btn big primary" id="analyzeBtn">③ 运行一致性校验</button>
+    </div>
+  </section>
+
+  <!-- ============ 右栏：结果 ============ -->
+  <section class="col">
+    <div class="card result-card" id="analyzeCard">
+      <div class="card-head"><h2>④ 一致性结果</h2></div>
+      <div class="placeholder" id="analyzePlaceholder">
+        录入基准点与约束后点击「运行一致性校验」<br>系统将检查全部约束能否同时成立
+      </div>
+      <div id="analyzeResult" hidden></div>
+    </div>
+
+    <div class="card result-card">
+      <div class="card-head"><h2>⑤ 间隙查询与合格判定</h2></div>
+      <div class="grid-form">
+        <label>起点
+          <select id="qFrom" class="input"></select>
+        </label>
+        <label>终点
+          <select id="qTo" class="input"></select>
+        </label>
+        <label>目标下限 μm
+          <input type="number" id="qTargetLow" class="input" step="1">
+        </label>
+        <label>目标上限 μm
+          <input type="number" id="qTargetHigh" class="input" step="1">
+        </label>
+      </div>
+      <div class="row">
+        <button class="btn primary" id="queryBtn">查询间隙</button>
+      </div>
+      <div class="message" id="queryMessage" hidden></div>
+      <div id="queryResult" class="query-result"></div>
+    </div>
+
+    <div class="card result-card">
+      <div class="card-head"><h2>⑥ 测量清单精简</h2></div>
+      <p class="hint">对一致的尺寸链，按录入顺序逐条试删约束；仅当删去后<b>全部有序点对</b>的最紧上下界及无界状态均不变时才判为可删。精简结果可预览，确认后把可删项从编辑表移除。</p>
+      <div class="row">
+        <button class="btn primary" id="simplifyBtn">生成精简预览</button>
+      </div>
+      <div class="message" id="simplifyMessage" hidden></div>
+      <div id="simplifyResult" class="simplify-result"></div>
+    </div>
+
+    <div class="card result-card">
+      <div class="card-head"><h2>⑦ 测量容差预算</h2></div>
+      <p class="hint">按测量编号为每条约束设置整数步长（0～1000，默认 1；<b>0 表示锁定</b>，区间不随预算放宽）。以同一非负整数 k 把每条区间放宽为 [下限−k×步长, 上限+k×步长]，求使整张清单<b>首次一致</b>的最小 k；k&gt;0 时给出 k−1 下的负环证据与 k 下的调整后区间。</p>
+      <div class="table-wrap step-table-wrap">
+        <table class="data-table" id="stepTable">
+          <thead>
+            <tr><th>编号</th><th>原区间 μm</th><th>步长</th><th>标记</th></tr>
+          </thead>
+          <tbody id="stepTbody"></tbody>
+        </table>
+        <p class="empty-hint" id="stepEmpty">尚未录入约束</p>
+      </div>
+      <div class="row">
+        <button class="btn primary" id="toleranceBtn">计算最小预算</button>
+      </div>
+      <div class="message" id="toleranceMessage" hidden></div>
+      <div id="toleranceResult" class="tolerance-result"></div>
+    </div>
+
+    <div class="card result-card">
+      <div class="card-head"><h2>⑧ 名义坐标拟合</h2></div>
+      <p class="hint">为每个基准点录入整数微米<b>名义坐标</b>（默认 0；<b>首个基准点的实际坐标固定为 0</b>）。在满足全部测量的整数坐标方案中，先最小化最大绝对偏差 D = max |实际 − 名义|，再按基准点录入顺序取坐标向量字典序最小者；计算结果可超出 ±10⁹ 录入范围。</p>
+      <div class="table-wrap nominal-table-wrap">
+        <table class="data-table" id="nominalTable">
+          <thead>
+            <tr><th>基准点</th><th>名义坐标 μm</th><th>标记</th></tr>
+          </thead>
+          <tbody id="nominalTbody"></tbody>
+        </table>
+        <p class="empty-hint" id="nominalEmpty">尚未录入基准点</p>
+      </div>
+      <div class="row">
+        <button class="btn primary" id="fitBtn">计算拟合方案</button>
+      </div>
+      <div class="message" id="fitMessage" hidden></div>
+      <div id="fitResult" class="fit-result"></div>
+    </div>
+
+    <div class="card result-card">
+      <div class="card-head"><h2>⑨ 补测读数窗口</h2></div>
+      <p class="hint">选择拟补测的<b>两个不同基准点</b>（补一条精确测量 [r, r]，r 为整数 μm）与<b>目标点对</b>的整数微米合格区间。在 r ∈ [−10⁹, 10⁹] 内求全部“加入后清单仍一致、目标间隙最紧界有界且<b>完全落入</b>合格区间”的读数，按起点升序输出为若干<b>不可再扩展、互不相邻</b>的整数闭区间；不会逐一枚举读数。原清单矛盾时只显示现有负环，无窗口时明确提示无可用读数。</p>
+      <div class="grid-form">
+        <label>补测起点
+          <select id="wFrom" class="input"></select>
+        </label>
+        <label>补测终点
+          <select id="wTo" class="input"></select>
+        </label>
+        <label>目标起点
+          <select id="wTargetFrom" class="input"></select>
+        </label>
+        <label>目标终点
+          <select id="wTargetTo" class="input"></select>
+        </label>
+        <label>目标下限 μm
+          <input type="number" id="wTargetLow" class="input" step="1">
+        </label>
+        <label>目标上限 μm
+          <input type="number" id="wTargetHigh" class="input" step="1">
+        </label>
+      </div>
+      <div class="row">
+        <button class="btn primary" id="windowBtn">计算补测读数窗口</button>
+      </div>
+      <div class="message" id="windowMessage" hidden></div>
+      <div id="windowResult" class="window-result"></div>
+    </div>
+
+    <div class="card result-card">
+      <div class="card-head"><h2>⑩ 垫片组合选配</h2></div>
+      <p class="hint">选择<b>目标点对</b>与整数微米<b>合格区间</b>，录入 1～10 个<b>有序安装位</b>；每位方向 <b>+1 / −1</b>，提供 1～6 个厚度 0～10⁶ μm、成本 0～1000 的整数选项。每位恰选一个选项，其<b>有符号厚度之和只把原间隙最紧区间整体平移</b>（不改任何测量），要求平移后的整个区间落入合格区间。先使总成本最低，并列时按安装位顺序取选项序号（从 1 开始）向量字典序最小者；算法不逐一枚举全部组合。原清单矛盾时只显示现有负环；目标间隙无界或无组合可达时明确提示无解。</p>
+      <div class="grid-form">
+        <label>目标起点
+          <select id="sTargetFrom" class="input"></select>
+        </label>
+        <label>目标终点
+          <select id="sTargetTo" class="input"></select>
+        </label>
+        <label>目标下限 μm
+          <input type="number" id="sTargetLow" class="input" step="1">
+        </label>
+        <label>目标上限 μm
+          <input type="number" id="sTargetHigh" class="input" step="1">
+        </label>
+      </div>
+      <div class="row shim-pos-actions">
+        <button class="btn primary" id="addPositionBtn">＋ 添加安装位</button>
+        <span class="counter" id="positionCounter">0 / 10</span>
+      </div>
+      <div id="positionsWrap" class="positions-wrap"></div>
+      <p class="empty-hint" id="positionEmpty">尚未录入安装位（至少 1 个，至多 10 个）</p>
+      <div class="row">
+        <button class="btn primary" id="shimBtn">计算垫片选配方案</button>
+      </div>
+      <div class="message" id="shimMessage" hidden></div>
+      <div id="shimResult" class="shim-result"></div>
+    </div>
+
+    <div class="card result-card">
+      <div class="card-head"><h2>⑪ 尺寸链改动影响</h2></div>
+      <p class="hint">把当前基准点与测量清单<b>保存为独立基线</b>，随后继续编辑测量；点击<b>比较改动影响</b>即把基线与当前编辑稿一起提交，按基准点录入顺序逐<b>有序点对</b>比较最紧上下界与无界状态，仅列出发生变化的点对（无界为 ±∞），并判定<b>收紧 / 放宽 / 混合 / 变为有界 / 变为无界</b>。两版<b>基准点名称与顺序须相同</b>，测量可增删改；任一版矛盾时只显示各矛盾版本的负环，不生成点对差异。基线或编辑稿变化后旧报告立即清除。</p>
+      <div class="row">
+        <button class="btn primary" id="saveBaselineBtn">保存当前为基线</button>
+        <button class="btn ghost" id="clearBaselineBtn">清除基线</button>
+      </div>
+      <div id="baselineInfo" class="baseline-info"></div>
+      <div class="row">
+        <button class="btn primary" id="impactBtn">比较改动影响</button>
+      </div>
+      <div class="message" id="impactMessage" hidden></div>
+      <div id="impactResult" class="impact-result"></div>
+    </div>
+
+    <div class="card result-card">
+      <div class="card-head">
+        <h2>⑫ 矛盾测量最小撤回</h2>
+        <span class="counter" id="removableCounter">0 / 16 可撤回</span>
+      </div>
+      <p class="hint">把每条测量标记为<b>可撤回</b>或<b>锁定</b>（缺省锁定，可撤回至多 16 条）。矛盾时只允许删除可撤回测量，求使剩余清单一致的<b>最少删除条数</b>；并列时按原录入顺序取删除序号列表字典序最小者，求解由负环引导搜索、不遍历全部删除子集。预览展示<b>原负环、撤回编号与剩余清单</b>，<b>确认后才应用删除</b>；锁定测量自身矛盾时返回不可修复及锁定部分的负环。点、测量或标记变化后预览立即失效。</p>
+      <div class="table-wrap removal-table-wrap">
+        <table class="data-table" id="removalTable">
+          <thead>
+            <tr><th>编号</th><th>段</th><th>区间 μm</th><th>标记</th></tr>
+          </thead>
+          <tbody id="removalTbody"></tbody>
+        </table>
+        <p class="empty-hint" id="removalEmpty">尚未录入约束</p>
+      </div>
+      <div class="row">
+        <button class="btn primary" id="minRemovalBtn">计算最小撤回预览</button>
+      </div>
+      <div class="message" id="minRemovalMessage" hidden></div>
+      <div id="minRemovalResult" class="minremoval-result"></div>
+    </div>
+  </section>
+</main>
+
+<footer class="footer">装配尺寸链校验台 · 本地运行 · 全部计算在服务端以整数精确完成</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

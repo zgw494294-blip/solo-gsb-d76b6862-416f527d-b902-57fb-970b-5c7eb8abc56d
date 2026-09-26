@@ -1,0 +1,7 @@
+services:
+  dimension-chain:
+    build: .
+    container_name: dimension-chain-bench
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
