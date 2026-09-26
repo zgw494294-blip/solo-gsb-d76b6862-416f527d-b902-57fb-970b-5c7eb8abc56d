@@ -22,6 +22,13 @@
                           空撤回集；矛盾时只允许删除可撤回测量，求使剩余清单一致
                           的最少删除条数，并列时按原录入顺序取删除序号列表字典序
                           最小者；锁定测量自身矛盾时返回不可修复及锁定部分负环）
+  POST /api/inspection-order 测量复核排程（从当前清单选取 1～16 条测量，为每条
+                          设置复核耗时、独立不合格概率（‰）与必须先复核的测量
+                          编号；依赖只能引用所选测量，成环报错；复核遇首条不合格
+                          即停止，求满足依赖且预期总耗时最小的完整顺序，并列时
+                          按原录入位置的序号向量取字典序最小者；返回顺序、每步
+                          执行概率与预期总耗时，概率与期望值以精确分数计算，
+                          不枚举全部排列）
 静态：GET /         前端页面（static/index.html）
 """
 
@@ -559,6 +566,28 @@ async def min_removal(request: Request):
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"detail": list(exc.args[0])})
     return solver.min_removal(points, constraints, removable)
+
+
+@app.post("/api/inspection-order")
+async def inspection_order(request: Request):
+    try:
+        raw = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"detail": ["请求体不是合法的 JSON"]})
+    if not isinstance(raw, dict):
+        return JSONResponse(status_code=400, content={"detail": ["请求体必须是 JSON 对象"]})
+    try:
+        points, constraints = _prepare(raw)
+    except ValidationError as exc:
+        return JSONResponse(status_code=400,
+                            content={"detail": _validation_messages(exc)})
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"detail": list(exc.args[0])})
+    try:
+        items = solver.validate_inspection_items(constraints, raw.get("items"))
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"detail": list(exc.args[0])})
+    return solver.inspection_order(points, constraints, items)
 
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"

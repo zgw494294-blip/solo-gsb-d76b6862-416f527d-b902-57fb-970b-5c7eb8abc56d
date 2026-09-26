@@ -30,12 +30,18 @@
   负环上的可撤回编号分支）并以“可撤回编号两两不交的负环打包”作下界剪枝，
   不枚举全部删除子集；并列时按原录入顺序取删除序号列表字典序最小者；
   锁定测量自身矛盾时不可修复，返回锁定部分的负环。
-所有运算均为整数，无浮点误差。
+- 测量复核排程：从当前清单选取 1～16 条测量，各设复核耗时、独立不合格概率
+  （‰）与先决依赖（只能引用所选测量，成环报错）；复核遇首条不合格即停止。
+  求满足依赖且预期总耗时最小的完整顺序，并列时按原录入位置的序号向量取
+  字典序最小者；子集动态规划（2^n 状态），不枚举全部排列；概率与期望值
+  以精确分数计算与返回。
+所有运算均为整数或精确分数，无浮点误差。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 
 MAX_POINTS = 30
 MIN_POINTS = 2
@@ -1361,3 +1367,260 @@ def min_removal(points: list[str], constraints: list[dict],
                 "remainingIds": [c["id"] for i, c in enumerate(constraints)
                                  if i not in removed_set],
             }}
+
+
+# ============================ 测量复核排程 ============================
+
+MIN_INSPECTION_ITEMS = 1
+MAX_INSPECTION_ITEMS = 16
+MIN_REVIEW_DURATION = 1
+MAX_REVIEW_DURATION = 1000
+MIN_FAIL_PERMILLE = 0
+MAX_FAIL_PERMILLE = 999  # 不合格概率（‰）；合格概率 = (1000 − p) / 1000 ≥ 1/1000
+
+
+def _find_dep_cycle(items: list[dict]) -> list[str] | None:
+    """在“必须先复核”依赖关系上找一条环（用于报错）；无环返回 None。
+
+    边 X → D 表示 X 依赖 D（D 必须先复核）；有向环即互相等待的依赖循环。
+    """
+    deps_of = {it["id"]: it["deps"] for it in items}
+    color: dict[str, int] = {}   # 缺省 0 未访 / 1 在栈上 / 2 已完成
+    stack: list[str] = []
+    found: list[str] = []
+
+    def dfs(u: str) -> bool:
+        color[u] = 1
+        stack.append(u)
+        for v in deps_of[u]:
+            if color.get(v, 0) == 0:
+                if dfs(v):
+                    return True
+            elif color[v] == 1:
+                found.extend(stack[stack.index(v):])
+                return True
+        stack.pop()
+        color[u] = 2
+        return False
+
+    for it in items:
+        if color.get(it["id"], 0) == 0 and dfs(it["id"]):
+            return found
+    return None
+
+
+def validate_inspection_items(constraints: list[dict], raw_items) -> list[dict]:
+    """校验复核排程的测量选择与排程参数，返回按录入位置排序的条目列表。
+
+    每条：{"id", "entryIndex"(从 1 起的录入位置), "duration", "failPermille", "deps"}。
+    规则：从当前清单选取 1～16 条测量（须已录入、不得重复）；复核耗时为
+    1～1000 的整数；独立不合格概率为 0～999 的整数（‰）；依赖只能引用所选
+    测量（不得引用未选取的测量、不得重复、不得依赖自身）；依赖成环时报错。
+    """
+    if not isinstance(raw_items, list):
+        raise ValueError(["items 必须为数组：元素为 {id, duration, failPermille, deps} 对象"])
+    if not (MIN_INSPECTION_ITEMS <= len(raw_items) <= MAX_INSPECTION_ITEMS):
+        raise ValueError([f"复核测量须选取 {MIN_INSPECTION_ITEMS}～{MAX_INSPECTION_ITEMS} 条"
+                          f"（当前 {len(raw_items)} 条）"])
+
+    entry_of = {c["id"]: i + 1 for i, c in enumerate(constraints)}  # 录入位置（1 起）
+    errors: list[str] = []
+    items: list[dict] = []
+    seen: set[str] = set()
+    for k, raw in enumerate(raw_items):
+        prefix = f"复核条目 {k + 1}"
+        if not isinstance(raw, dict):
+            errors.append(f"{prefix}：格式不是对象")
+            continue
+        cid = raw.get("id")
+        cid = cid.strip() if isinstance(cid, str) else ""
+        if not cid:
+            errors.append(f"{prefix}：编号为空")
+        elif cid not in entry_of:
+            errors.append(f"{prefix}：测量 {cid} 尚未录入")
+        elif cid in seen:
+            errors.append(f"{prefix}：测量 {cid} 重复选取")
+        else:
+            seen.add(cid)
+
+        duration = raw.get("duration")
+        if not isinstance(duration, int) or isinstance(duration, bool):
+            errors.append(f"{prefix}（{cid or '无编号'}）：复核耗时必须为整数")
+            duration = None
+        elif not MIN_REVIEW_DURATION <= duration <= MAX_REVIEW_DURATION:
+            errors.append(f"{prefix}（{cid}）：复核耗时须为 {MIN_REVIEW_DURATION}～"
+                          f"{MAX_REVIEW_DURATION}（当前 {duration}）")
+            duration = None
+
+        fail = raw.get("failPermille")
+        if not isinstance(fail, int) or isinstance(fail, bool):
+            errors.append(f"{prefix}（{cid or '无编号'}）：不合格概率必须为整数（‰）")
+            fail = None
+        elif not MIN_FAIL_PERMILLE <= fail <= MAX_FAIL_PERMILLE:
+            errors.append(f"{prefix}（{cid}）：不合格概率须为 {MIN_FAIL_PERMILLE}～"
+                          f"{MAX_FAIL_PERMILLE}‰（当前 {fail}）")
+            fail = None
+
+        deps: list[str] = []
+        raw_deps = raw.get("deps")
+        if raw_deps is None:
+            raw_deps = []
+        if not isinstance(raw_deps, list):
+            errors.append(f"{prefix}（{cid or '无编号'}）：依赖 deps 必须为编号数组")
+        else:
+            dep_seen: set[str] = set()
+            for d in raw_deps:
+                did = d.strip() if isinstance(d, str) else ""
+                if not did:
+                    errors.append(f"{prefix}（{cid or '无编号'}）：依赖编号为空或不是字符串")
+                    continue
+                if did == cid:
+                    errors.append(f"{prefix}（{cid}）：不能依赖自身")
+                    continue
+                if did in dep_seen:
+                    errors.append(f"{prefix}（{cid}）：依赖 {did} 重复")
+                    continue
+                dep_seen.add(did)
+                deps.append(did)
+        items.append({"id": cid, "duration": duration, "failPermille": fail, "deps": deps})
+    if errors:
+        raise ValueError(errors)
+
+    # 依赖只能引用所选测量
+    selected = {it["id"] for it in items}
+    for k, it in enumerate(items):
+        outside = [d for d in it["deps"] if d not in selected]
+        if outside:
+            errors.append(f"复核条目 {k + 1}（{it['id']}）：依赖只能引用所选测量，"
+                          f"未选取：" + "、".join(outside))
+    if errors:
+        raise ValueError(errors)
+
+    cycle = _find_dep_cycle(items)
+    if cycle is not None:
+        raise ValueError(["复核依赖成环：" + " → ".join(cycle + [cycle[0]])])
+
+    for it in items:
+        it["entryIndex"] = entry_of[it["id"]]
+    items.sort(key=lambda it: it["entryIndex"])
+    return items
+
+
+def _fraction_payload(fr: Fraction) -> dict:
+    """精确分数 -> 对外结构：既约分子/分母（字符串，可超 JS 安全整数）与精确十进制。
+
+    本模块的分母都是 1000 的幂约分而来（只含因子 2 与 5），十进制展开必有限。
+    """
+    num, den = fr.numerator, fr.denominator
+    d = den
+    twos = 0
+    while d % 2 == 0:
+        d //= 2
+        twos += 1
+    fives = 0
+    while d % 5 == 0:
+        d //= 5
+        fives += 1
+    if d != 1:
+        raise RuntimeError("分数分母含 2/5 以外的因子，十进制展开不有限")
+    places = max(twos, fives)
+    scaled = num * 10 ** places // den
+    digits = str(scaled).rjust(places + 1, "0")
+    if places:
+        ip, fp = digits[:-places], digits[-places:].rstrip("0")
+        decimal = ip if not fp else f"{ip}.{fp}"
+    else:
+        decimal = digits
+    return {"num": str(num), "den": str(den), "decimal": decimal}
+
+
+def inspection_order(points: list[str], constraints: list[dict],
+                     items: list[dict]) -> dict:
+    """测量复核排程：求满足依赖且预期总耗时最小的完整顺序（子集 DP，不枚举排列）。
+
+    过程：按某一完整顺序逐条复核，遇到首条不合格即停止。顺序 π 的预期总耗时
+        E(π) = Σ_k t_{π(k)} · ∏_{j<k} ( s_{π(j)} / 1000 )
+    其中 t 为复核耗时、s = 1000 − 不合格概率‰（合格概率的千分分子，s ≥ 1）。
+    优化目标：E(π) 最小；并列时按原录入位置的序号向量取字典序最小者。
+
+    子集 DP：令 H(R) = 1000^|R| ·（在“此前各项均合格”条件下处理剩余集合 R 的
+    最小预期耗时），则 H(∅) = 0，且
+        H(R) = min_{i ∈ R, deps(i) ∩ R = ∅}  t_i·1000^|R| + s_i·H(R \\ {i})
+    （i 可作为 R 中下一条 ⇔ 其全部先决测量已不在 R 中；依赖无环保证每个非空
+    子集都有可选项）。同一 R 的各候选分母同为 1000^|R|，整数比较即精确比较；
+    同值候选取录入位置最小者（首元素即决定序号向量字典序），递归还原即得全局
+    字典序最小顺序。状态数 2^n（n ≤ 16）、每状态至多 n 个转移，不枚举 n! 个
+    排列；全程整数运算，概率与期望值以既约分数返回。
+    """
+    n = len(items)
+    durations = [it["duration"] for it in items]
+    passes = [1000 - it["failPermille"] for it in items]
+    entry = [it["entryIndex"] for it in items]
+    index_of = {it["id"]: k for k, it in enumerate(items)}
+    deps_mask = [0] * n
+    for k, it in enumerate(items):
+        mask = 0
+        for d in it["deps"]:
+            mask |= 1 << index_of[d]
+        deps_mask[k] = mask
+
+    pow1000 = [1]
+    for _ in range(n):
+        pow1000.append(pow1000[-1] * 1000)
+
+    size = 1 << n
+    H = [0] * size
+    choice = [-1] * size
+    for mask in range(1, size):
+        weight = pow1000[mask.bit_count()]
+        best = None
+        best_i = -1
+        bits = mask
+        while bits:
+            bit = bits & (-bits)
+            bits ^= bit
+            i = bit.bit_length() - 1
+            if deps_mask[i] & mask:
+                continue
+            cand = durations[i] * weight + passes[i] * H[mask ^ bit]
+            if best is None or cand < best or (cand == best and entry[i] < entry[best_i]):
+                best = cand
+                best_i = i
+        if best_i < 0:
+            raise RuntimeError("依赖无环但子集没有可执行的测量")
+        H[mask] = best
+        choice[mask] = best_i
+
+    order_idx: list[int] = []
+    mask = size - 1
+    while mask:
+        i = choice[mask]
+        order_idx.append(i)
+        mask ^= 1 << i
+
+    # 每步执行概率（此前各项均合格的概率）与预期总耗时，均为精确分数
+    steps: list[dict] = []
+    prob = Fraction(1, 1)
+    for seq, i in enumerate(order_idx, 1):
+        it = items[i]
+        steps.append({
+            "seq": seq,
+            "id": it["id"],
+            "entryIndex": it["entryIndex"],
+            "duration": it["duration"],
+            "failPermille": it["failPermille"],
+            "deps": it["deps"],
+            "probability": _fraction_payload(prob),
+        })
+        prob *= Fraction(passes[i], 1000)
+    expected = Fraction(H[size - 1], pow1000[n])
+
+    return {
+        "points": points,
+        "itemCount": n,
+        "plan": {
+            "order": steps,
+            "indexVector": [items[i]["entryIndex"] for i in order_idx],
+            "expected": _fraction_payload(expected),
+        },
+    }

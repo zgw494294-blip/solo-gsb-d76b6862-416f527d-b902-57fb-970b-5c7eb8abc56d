@@ -491,6 +491,19 @@ body {
 .btn.rem-toggle.on:hover { background: #a06a08; }
 .tag.rem { background: var(--review-bg); color: var(--review); }
 
+/* 测量复核排程 */
+.insp-result { margin-top: 14px; }
+.insp-table-wrap { max-height: 260px; }
+.insp-input { max-width: 84px; padding: 4px 8px; }
+.insp-deps { min-width: 130px; padding: 4px 8px; }
+.insp-input.bad, .insp-deps.bad { border-color: var(--fail); background: var(--fail-bg); }
+.insp-entry { color: var(--ink-soft); margin-left: 5px; font-size: 11px; }
+.btn.insp-toggle { padding: 2px 12px; font-size: 11.5px; min-width: 58px; }
+.btn.insp-toggle.on { background: var(--primary); border-color: var(--primary); color: #fff; }
+.btn.insp-toggle.on:hover { background: var(--primary-dark); }
+.insp-plan-table { max-height: 320px; }
+.insp-plan-table td.frac-cell small { color: var(--ink-soft); font-weight: 400; }
+
 @media (max-width: 960px) {
   .layout { grid-template-columns: 1fr; }
 }

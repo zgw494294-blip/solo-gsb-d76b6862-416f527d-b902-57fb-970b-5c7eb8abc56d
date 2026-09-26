@@ -146,6 +146,24 @@ const EXAMPLES = {
     removable: ["M01", "M02", "M03"],
     query: null,
     autoMinRemoval: true
+  },
+  "12": {
+    name: "测量复核排程",
+    points: ["A", "B", "C"],
+    constraints: [
+      { id: "M01", from: "A", to: "B", low: 10, high: 20 },
+      { id: "M02", from: "B", to: "C", low: 10, high: 20 },
+      { id: "M03", from: "A", to: "C", low: 20, high: 40 },
+      { id: "M04", from: "A", to: "B", low: 5, high: 25 }
+    ],
+    inspection: {
+      M01: { duration: "8", failPermille: "0", deps: "" },
+      M02: { duration: "5", failPermille: "200", deps: "" },
+      M03: { duration: "3", failPermille: "100", deps: "M02" },
+      M04: { duration: "4", failPermille: "400", deps: "M01" }
+    },
+    query: null,
+    autoInspection: true
   }
 };
 
@@ -172,6 +190,9 @@ let state = {
   impact: null,            // 最近一次改动影响报告（基线或编辑稿变化后置空失效）
   removable: {},           // 测量编号 -> true（标记为可撤回；缺省锁定，至多 16 条）
   minRemoval: null,        // 最近一次最小撤回预览（点、测量或标记变化后置空失效）
+  inspSelected: {},        // 复核排程：测量编号 -> true（选取，至多 16 条）
+  inspParams: {},          // 复核排程：测量编号 -> {duration, failPermille, deps}（录入值保留字符串）
+  inspection: null,        // 最近一次复核排程结果（测量或排程参数变化后置空失效）
   query: { from: "", to: "", targetLow: "", targetHigh: "" },
   readingWindow: { from: "", to: "", targetFrom: "", targetTo: "", targetLow: "", targetHigh: "" },
   shimPlan: { targetFrom: "", targetTo: "", targetLow: "", targetHigh: "" }
@@ -205,7 +226,9 @@ function persist() {
       shimPlan: state.shimPlan,
       positions: state.positions,
       baseline: state.baseline,
-      removable: state.removable
+      removable: state.removable,
+      inspSelected: state.inspSelected,
+      inspParams: state.inspParams
     }));
   } catch (e) { /* 忽略存储异常 */ }
 }
@@ -218,12 +241,19 @@ function markDirty() {
   state.shim = null;       // 点/测量变化后旧垫片方案失效
   state.impact = null;     // 编辑稿变化后旧改动影响报告失效
   state.minRemoval = null; // 点/测量变化后旧最小撤回预览失效
+  state.inspection = null; // 测量变化后旧复核排程结果失效
   const ids = new Set(state.constraints.map((c) => c.id));
   for (const id of Object.keys(state.steps)) {
     if (!ids.has(id)) delete state.steps[id];   // 清理已删除约束的步长
   }
   for (const id of Object.keys(state.removable)) {
     if (!ids.has(id)) delete state.removable[id];   // 清理已删除约束的可撤回标记
+  }
+  for (const id of Object.keys(state.inspSelected)) {
+    if (!ids.has(id)) delete state.inspSelected[id];   // 清理已删除约束的排程选取
+  }
+  for (const id of Object.keys(state.inspParams)) {
+    if (!ids.has(id)) delete state.inspParams[id];   // 清理已删除约束的排程参数
   }
   const pset = new Set(state.points);
   for (const p of Object.keys(state.nominals)) {
@@ -249,6 +279,7 @@ function markDirty() {
   renderShimResult();
   renderImpact();
   renderMinRemoval();
+  renderInspection();
 }
 async function postJSON(url, body) {
   const resp = await fetch(url, {
@@ -341,6 +372,15 @@ function showMinRemovalError(msg) {
     : esc(msg);
 }
 function clearMinRemovalMessage() { $("minRemovalMessage").hidden = true; }
+function showInspError(msg) {
+  const box = $("inspMessage");
+  box.hidden = false;
+  box.className = "message error";
+  box.innerHTML = Array.isArray(msg)
+    ? "<ul>" + msg.map((m) => `<li>${esc(m)}</li>`).join("") + "</ul>"
+    : esc(msg);
+}
+function clearInspMessage() { $("inspMessage").hidden = true; }
 
 /* ---------------- 渲染：基准点 ---------------- */
 function renderPoints() {
@@ -418,6 +458,7 @@ function renderAll() {
   renderShimResult();
   renderImpact();
   renderMinRemoval();
+  renderInspection();
 }
 
 /* ---------------- 结果区 ---------------- */
@@ -1614,6 +1655,164 @@ function applyMinRemoval() {
   runAnalyze();
 }
 
+/* ---------------- 测量复核排程 ---------------- */
+function inspSelectedCount() {
+  return state.constraints.filter((c) => state.inspSelected[c.id]).length;
+}
+
+function parseDepsRaw(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return [];
+  return s.split(/[,，、;；\s]+/).filter(Boolean);
+}
+
+function inspDepsBad(id, raw) {
+  const selSet = new Set(
+    state.constraints.filter((c) => state.inspSelected[c.id]).map((c) => c.id));
+  const seen = new Set();
+  for (const d of parseDepsRaw(raw)) {
+    if (d === id || !selSet.has(d) || seen.has(d)) return true;
+    seen.add(d);
+  }
+  return false;
+}
+
+function renderInspectionTable() {
+  const tbody = $("inspTbody");
+  const has = state.constraints.length > 0;
+  $("inspEmpty").style.display = has ? "none" : "block";
+  $("inspTable").style.display = has ? "" : "none";
+  $("inspCounter").textContent = `${inspSelectedCount()} / 16 已选`;
+  if (!has) { tbody.innerHTML = ""; return; }
+  tbody.innerHTML = state.constraints.map((c, idx) => {
+    const sel = !!state.inspSelected[c.id];
+    const saved = state.inspParams[c.id] || {};
+    const p = {
+      duration: saved.duration !== undefined && saved.duration !== null ? String(saved.duration) : "",
+      failPermille: saved.failPermille !== undefined && saved.failPermille !== null ? String(saved.failPermille) : "",
+      deps: saved.deps !== undefined && saved.deps !== null ? String(saved.deps) : ""
+    };
+    const dur = parseIntStrict(p.duration);
+    const durBad = sel && (dur === null || dur < 1 || dur > 1000);
+    const fp = parseIntStrict(p.failPermille);
+    const fpBad = sel && (fp === null || fp < 0 || fp > 999);
+    const depsBad = sel && inspDepsBad(c.id, p.deps);
+    return `<tr>
+      <td><button class="btn tiny insp-toggle${sel ? " on" : ""}" data-insp-toggle="${esc(c.id)}"
+        >${sel ? "已选" : "选取"}</button></td>
+      <td>${esc(c.id)}<small class="insp-entry">#${idx + 1}</small></td>
+      <td><input type="number" class="input insp-input${durBad ? " bad" : ""}"
+           data-insp-field="duration" data-insp-for="${esc(c.id)}" min="1" max="1000" step="1"
+           value="${esc(p.duration)}"${sel ? "" : " disabled"} placeholder="1～1000"></td>
+      <td><input type="number" class="input insp-input${fpBad ? " bad" : ""}"
+           data-insp-field="failPermille" data-insp-for="${esc(c.id)}" min="0" max="999" step="1"
+           value="${esc(p.failPermille)}"${sel ? "" : " disabled"} placeholder="0～999"></td>
+      <td><input type="text" class="input insp-deps${depsBad ? " bad" : ""}"
+           data-insp-field="deps" data-insp-for="${esc(c.id)}"
+           value="${esc(p.deps)}"${sel ? "" : " disabled"} placeholder="先复核编号，逗号分隔"></td>
+    </tr>`;
+  }).join("");
+}
+
+function fmtFraction(fr) {
+  return fr.den === "1" ? fr.num : `${fr.num} / ${fr.den}`;
+}
+
+function renderInspectionResult() {
+  const box = $("inspResult");
+  const r = state.inspection;
+  if (!r) { box.innerHTML = ""; return; }
+  const plan = r.plan;
+  const rows = plan.order.map((o) => `<tr>
+      <td>${o.seq}</td>
+      <td>${esc(o.id)}</td>
+      <td class="num">${o.entryIndex}</td>
+      <td class="num">${o.duration}</td>
+      <td class="num">${o.failPermille}</td>
+      <td class="num">${o.deps.length ? esc(o.deps.join("、")) : "—"}</td>
+      <td class="num frac-cell"><b>${esc(fmtFraction(o.probability))}</b><br>
+        <small>${esc(o.probability.decimal)}</small></td>
+    </tr>`).join("");
+  const exp = plan.expected;
+  const expText = fmtFraction(exp) + (exp.den === "1" ? "" : ` = ${exp.decimal}`);
+  const vec = plan.indexVector.map((x) => `<li>${x}</li>`).join("");
+  box.innerHTML = `
+    <div class="verdict-banner pass"><span class="icon">✓</span>
+      <div>复核排程：预期总耗时 ${esc(expText)}
+      <span class="sub">共 ${plan.order.length} 条，按此顺序逐条复核、遇首条不合格即停止；顺序满足全部先决依赖且预期总耗时最小，并列时按原录入位置的序号向量取字典序最小者。概率与耗时为精确分数（十进制为其有限展开）。</span></div>
+    </div>
+    <dl class="kv">
+      <dt>预期总耗时（精确分数）</dt><dd>${esc(expText)}</dd>
+      <dt>录入位置序号向量</dt><dd><ol class="shim-vec">${vec}</ol></dd>
+    </dl>
+    <div class="table-wrap insp-plan-table">
+      <table class="data-table">
+        <thead><tr><th>顺序</th><th>编号</th><th>录入位置</th><th>耗时</th><th>不合格‰</th><th>先复核</th><th>执行概率（此前全合格）</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderInspection() {
+  renderInspectionTable();
+  renderInspectionResult();
+}
+
+function readInspectionForSubmit() {
+  const errors = [];
+  const ids = state.constraints.filter((c) => state.inspSelected[c.id]).map((c) => c.id);
+  if (!ids.length) errors.push("请至少选取 1 条复核测量。");
+  if (ids.length > 16) errors.push("复核测量至多选取 16 条。");
+  const idSet = new Set(ids);
+  const items = [];
+  for (const id of ids) {
+    const p = state.inspParams[id] || {};
+    const duration = parseIntStrict(p.duration);
+    const failPermille = parseIntStrict(p.failPermille);
+    if (duration === null) errors.push(`测量 ${id}：复核耗时必须为整数。`);
+    else if (duration < 1 || duration > 1000) errors.push(`测量 ${id}：复核耗时须为 1～1000（当前 ${duration}）。`);
+    if (failPermille === null) errors.push(`测量 ${id}：不合格概率必须为整数（‰）。`);
+    else if (failPermille < 0 || failPermille > 999) errors.push(`测量 ${id}：不合格概率须为 0～999‰（当前 ${failPermille}）。`);
+    const deps = parseDepsRaw(p.deps);
+    const seen = new Set();
+    for (const d of deps) {
+      if (d === id) errors.push(`测量 ${id}：不能依赖自身。`);
+      else if (!idSet.has(d)) errors.push(`测量 ${id}：依赖 ${d} 未选取（依赖只能引用所选测量）。`);
+      else if (seen.has(d)) errors.push(`测量 ${id}：依赖 ${d} 重复。`);
+      seen.add(d);
+    }
+    if (duration !== null && failPermille !== null) {
+      items.push({ id, duration, failPermille, deps });
+    }
+  }
+  return { errors, items };
+}
+
+async function runInspection() {
+  clearInspMessage();
+  if (state.points.length < 2) return showInspError("请先录入至少 2 个基准点。");
+  if (state.constraints.length < 1) return showInspError("请至少录入 1 条测量约束。");
+  const parsed = readInspectionForSubmit();
+  if (parsed.errors.length) return showInspError(parsed.errors);
+  const btn = $("inspBtn");
+  btn.disabled = true;
+  btn.textContent = "计算中…";
+  const { ok, data } = await postJSON("/api/inspection-order", {
+    points: state.points,
+    constraints: state.constraints,
+    items: parsed.items
+  });
+  btn.disabled = false;
+  btn.textContent = "计算复核排程";
+  if (!ok) {
+    state.inspection = null;
+    renderInspectionResult();
+    return showInspError(data && data.detail ? data.detail : "复核排程请求失败。");
+  }
+  state.inspection = data;
+  renderInspectionResult();
+}
+
 /* ---------------- 示例 ---------------- */
 async function loadExample(key) {
   const ex = EXAMPLES[key];
@@ -1638,8 +1837,18 @@ async function loadExample(key) {
   state.shim = null;
   state.impact = null;   // 编辑稿变化后旧改动影响报告失效
   state.minRemoval = null;
+  state.inspection = null;
   state.removable = {};
   if (ex.removable) for (const id of ex.removable) state.removable[id] = true;
+  state.inspSelected = {};
+  state.inspParams = {};
+  if (ex.inspection) {
+    for (const id of Object.keys(ex.inspection)) {
+      state.inspSelected[id] = true;
+      const p = ex.inspection[id];
+      state.inspParams[id] = { duration: p.duration, failPermille: p.failPermille, deps: p.deps };
+    }
+  }
   if (ex.impactBaseline) {
     state.baseline = {
       points: ex.impactBaseline.points.slice(),
@@ -1653,11 +1862,13 @@ async function loadExample(key) {
   renderPositions();
   renderShimResult();
   renderMinRemoval();
+  renderInspection();
   clearSimplifyMessage();
   clearToleranceMessage();
   clearFitMessage();
   clearImpactMessage();
   clearMinRemovalMessage();
+  clearInspMessage();
   resetConstraintForm();
   if (ex.query) {
     state.query = { ...ex.query };
@@ -1709,6 +1920,9 @@ async function loadExample(key) {
   if (ex.autoMinRemoval) {
     await runMinRemoval();
   }
+  if (ex.autoInspection) {
+    await runInspection();
+  }
 }
 
 /* ---------------- 初始化 ---------------- */
@@ -1729,6 +1943,12 @@ function init() {
     }
     if (saved.removable && typeof saved.removable === "object") {
       state.removable = saved.removable;
+    }
+    if (saved.inspSelected && typeof saved.inspSelected === "object") {
+      state.inspSelected = saved.inspSelected;
+    }
+    if (saved.inspParams && typeof saved.inspParams === "object") {
+      state.inspParams = saved.inspParams;
     }
     if (Array.isArray(saved.positions)) {
       state.positions = saved.positions
@@ -1785,6 +2005,56 @@ function init() {
   $("clearBaselineBtn").addEventListener("click", clearBaseline);
   $("impactBtn").addEventListener("click", runImpact);
   $("minRemovalBtn").addEventListener("click", runMinRemoval);
+  $("inspBtn").addEventListener("click", runInspection);
+  $("inspTbody").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-insp-toggle]");
+    if (!btn) return;
+    const id = btn.dataset.inspToggle;
+    if (state.inspSelected[id]) {
+      delete state.inspSelected[id];
+    } else {
+      if (inspSelectedCount() >= 16) {
+        showInspError("复核测量至多选取 16 条；请先取消其他测量的选取。");
+        return;
+      }
+      state.inspSelected[id] = true;
+      if (!state.inspParams[id]) {
+        state.inspParams[id] = { duration: "10", failPermille: "0", deps: "" };
+      }
+    }
+    // 选取变化后旧排程结果失效
+    state.inspection = null;
+    clearInspMessage();
+    persist();
+    renderInspection();
+  });
+  $("inspTbody").addEventListener("input", (e) => {
+    const inp = e.target.closest("input[data-insp-field]");
+    if (!inp) return;
+    const id = inp.dataset.inspFor;
+    const field = inp.dataset.inspField;   // duration | failPermille | deps
+    if (!state.inspParams[id]) {
+      state.inspParams[id] = { duration: "10", failPermille: "0", deps: "" };
+    }
+    const raw = inp.value;
+    state.inspParams[id][field] = raw;
+    let bad = false;
+    if (field === "duration") {
+      const v = parseIntStrict(raw);
+      bad = v === null || v < 1 || v > 1000;
+    } else if (field === "failPermille") {
+      const v = parseIntStrict(raw);
+      bad = v === null || v < 0 || v > 999;
+    } else {
+      bad = inspDepsBad(id, raw);
+    }
+    inp.classList.toggle("bad", bad);
+    // 排程参数变化后旧排程结果失效
+    state.inspection = null;
+    clearInspMessage();
+    persist();
+    renderInspectionResult();
+  });
   $("removalTbody").addEventListener("click", (e) => {
     const btn = e.target.closest("button[data-rem-toggle]");
     if (!btn) return;

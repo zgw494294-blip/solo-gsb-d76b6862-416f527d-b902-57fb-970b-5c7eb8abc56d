@@ -12,7 +12,7 @@
     <span class="logo">⌖</span>
     <div>
       <h1>装配尺寸链校验台</h1>
-      <p class="subtitle">差分约束系统 · 负权闭环矛盾定位 · 最紧间隙界判定 · 容差预算 · 名义坐标拟合 · 补测读数窗口 · 垫片组合选配 · 尺寸链改动影响 · 矛盾测量最小撤回（单位：μm）</p>
+      <p class="subtitle">差分约束系统 · 负权闭环矛盾定位 · 最紧间隙界判定 · 容差预算 · 名义坐标拟合 · 补测读数窗口 · 垫片组合选配 · 尺寸链改动影响 · 矛盾测量最小撤回 · 测量复核排程（单位：μm）</p>
     </div>
   </div>
   <div class="examples">
@@ -30,6 +30,7 @@
       <option value="9">示例 9：垫片组合选配（最低成本 + 字典序）</option>
       <option value="10">示例 10：尺寸链改动影响（基线对比）</option>
       <option value="11">示例 11：矛盾测量最小撤回（最少删除）</option>
+      <option value="12">示例 12：测量复核排程（最小预期耗时）</option>
     </select>
   </div>
 </header>
@@ -272,10 +273,32 @@
       <div class="message" id="minRemovalMessage" hidden></div>
       <div id="minRemovalResult" class="minremoval-result"></div>
     </div>
+
+    <div class="card result-card">
+      <div class="card-head">
+        <h2>⑬ 测量复核排程</h2>
+        <span class="counter" id="inspCounter">0 / 16 已选</span>
+      </div>
+      <p class="hint">从当前清单<b>选取 1～16 条测量</b>，为每条设置<b>复核耗时</b>（1～1000 整数）、<b>独立不合格概率</b>（0～999 整数，单位 ‰）与<b>必须先复核的测量编号</b>（逗号分隔；只能引用所选测量，不得依赖自身，成环报错）。复核按完整顺序逐条进行，<b>遇首条不合格即停止</b>；求满足全部依赖且<b>预期总耗时最小</b>的完整顺序，并列时按<b>原录入位置的序号向量</b>取字典序最小者。概率与期望值以<b>精确分数</b>计算（子集动态规划，不枚举全部排列）。测量或排程参数变化后旧结果立即清除。</p>
+      <div class="table-wrap insp-table-wrap">
+        <table class="data-table" id="inspTable">
+          <thead>
+            <tr><th>选取</th><th>编号</th><th>耗时</th><th>不合格‰</th><th>先复核编号</th></tr>
+          </thead>
+          <tbody id="inspTbody"></tbody>
+        </table>
+        <p class="empty-hint" id="inspEmpty">尚未录入约束</p>
+      </div>
+      <div class="row">
+        <button class="btn primary" id="inspBtn">计算复核排程</button>
+      </div>
+      <div class="message" id="inspMessage" hidden></div>
+      <div id="inspResult" class="insp-result"></div>
+    </div>
   </section>
 </main>
 
-<footer class="footer">装配尺寸链校验台 · 本地运行 · 全部计算在服务端以整数精确完成</footer>
+<footer class="footer">装配尺寸链校验台 · 本地运行 · 全部计算在服务端以整数与精确分数完成</footer>
 
 <script src="/static/app.js"></script>
 </body>
